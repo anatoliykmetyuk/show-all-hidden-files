@@ -1,0 +1,9 @@
+{
+  "id": "show-all-hidden-files",
+  "name": "Show All Hidden Files",
+  "version": "0.1.0",
+  "minAppVersion": "1.4.0",
+  "description": "Reveals every dot-prefixed hidden file and folder in the Obsidian file explorer.",
+  "author": "Anatolii",
+  "isDesktopOnly": true
+}
