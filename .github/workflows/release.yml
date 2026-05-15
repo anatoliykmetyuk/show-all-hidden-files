@@ -26,12 +26,13 @@ jobs:
 
       - name: Verify tag matches manifest version
         run: |
-          if ! echo "${GITHUB_REF_NAME}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "Tag ${GITHUB_REF_NAME} is not a supported x.y.z semantic version"
+          if ! echo "${GITHUB_REF_NAME}" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Tag ${GITHUB_REF_NAME} is not a supported semantic version"
             exit 1
           fi
+          tag_version="${GITHUB_REF_NAME#v}"
           manifest_version="$(node -p "require('./manifest.json').version")"
-          if [ "${GITHUB_REF_NAME}" != "${manifest_version}" ]; then
+          if [ "${tag_version}" != "${manifest_version}" ]; then
             echo "Tag ${GITHUB_REF_NAME} does not match manifest version ${manifest_version}"
             exit 1
           fi
