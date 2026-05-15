@@ -4,6 +4,6 @@
   "version": "0.1.0",
   "minAppVersion": "1.4.0",
   "description": "Reveals every dot-prefixed hidden file and folder in the Obsidian file explorer.",
-  "author": "Anatolii",
+  "author": "Anatolii Kmetiuk",
   "isDesktopOnly": true
 }

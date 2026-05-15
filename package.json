@@ -1,0 +1,28 @@
+{
+  "name": "show-all-hidden-files",
+  "version": "0.1.0",
+  "description": "Reveals dot-prefixed hidden files and folders in the Obsidian file explorer.",
+  "main": "main.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc --noEmit --skipLibCheck && node esbuild.config.mjs production",
+    "check": "tsc --noEmit --skipLibCheck && node --check main.js"
+  },
+  "keywords": [
+    "obsidian",
+    "obsidian-plugin",
+    "hidden-files"
+  ],
+  "author": "Anatolii Kmetiuk",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.19.24",
+    "esbuild": "^0.25.12",
+    "tslib": "^2.8.1",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "obsidian": "latest"
+  }
+}

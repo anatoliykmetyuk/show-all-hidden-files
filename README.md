@@ -9,10 +9,8 @@ high-volume paths such as `.obsidian`, `.git`, `.venv`, `.env`, `.trash`, and
 
 ## Usage
 
-1. Place this folder at `<vault>/.obsidian/plugins/show-all-hidden-files`.
-2. In Obsidian, open Settings -> Community plugins.
-3. Enable **Show All Hidden Files**.
-4. Run **Show All Hidden Files: Rescan hidden files** from the command palette
+1. Install and enable **Show All Hidden Files**.
+2. Run **Show All Hidden Files: Rescan hidden files** from the command palette
    if hidden files were created after startup.
 
 The plugin also enables Obsidian's unsupported-file visibility setting while it
@@ -32,3 +30,41 @@ is active, so non-Markdown hidden files can appear in the file explorer.
 This is desktop-only. It depends on Obsidian's local filesystem adapter and
 undocumented internals, so it may need updates if Obsidian changes those
 internals.
+
+## Security and privacy
+
+- Uses Node.js filesystem APIs to scan the current vault.
+- Uses undocumented Obsidian internals to register hidden paths in the file
+  explorer.
+- Reveals hidden files that may contain secrets or configuration.
+- Does not use telemetry.
+- Does not make network requests.
+- Does not require an account or external service.
+- Does not include ads or paid features.
+
+## Development
+
+Install dependencies:
+
+```sh
+npm ci
+```
+
+Build the plugin:
+
+```sh
+npm run build
+```
+
+The build writes `main.js`, which Obsidian loads locally. `main.js` is generated
+and is not committed to the repository.
+
+## Release
+
+Releases are created by GitHub Actions when a semantic version tag is pushed.
+The tag must exactly match `manifest.json`'s `version`, for example `0.1.0`.
+
+The release workflow builds the plugin and attaches:
+
+- `main.js`
+- `manifest.json`

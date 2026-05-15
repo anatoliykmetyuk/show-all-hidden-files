@@ -1,17 +1,63 @@
-const { FileSystemAdapter, Notice, Plugin, TFile, TFolder, normalizePath } = require("obsidian");
-const fs = require("fs");
-const path = require("path");
+import {
+  FileSystemAdapter,
+  Notice,
+  Plugin,
+  TAbstractFile,
+  TFile,
+  TFolder,
+  Vault,
+  normalizePath,
+} from "obsidian";
+import * as fs from "node:fs";
+import * as path from "node:path";
 
 const NOTICE_MS = 6000;
 
-module.exports = class ShowAllHiddenFilesPlugin extends Plugin {
-  async onload() {
-    this.adapter = this.app.vault.adapter;
+type PatchRestorer = () => void;
+
+type ReconcileMethod = (normalizedPath: string, ...rest: unknown[]) => unknown;
+type ListRecursiveChildMethod = (normalizedPath: string, child: string | fs.Dirent, ...rest: unknown[]) => unknown;
+
+interface FileSystemAdapterInternals extends FileSystemAdapter {
+  files?: Record<string, TAbstractFile>;
+  listRecursiveChild?: ListRecursiveChildMethod;
+  reconcileDeletion?: ReconcileMethod;
+  reconcileFile?: ReconcileMethod;
+  reconcileFileInternal?: (normalizedPath: string, realPath: string) => Promise<unknown> | unknown;
+}
+
+interface VaultWithConfig extends Vault {
+  getConfig?: (key: string) => unknown;
+  setConfig?: (key: string, value: unknown) => void;
+}
+
+interface MutableAbstractFile extends TAbstractFile {
+  name: string;
+  parent: TFolder | null;
+  path: string;
+  stat: {
+    ctime: number;
+    mtime: number;
+    size: number;
+  };
+  vault: Vault;
+}
+
+interface MetadataCacheWithTrigger {
+  trigger?: (name: string, ...args: unknown[]) => void;
+}
+
+export default class ShowAllHiddenFilesPlugin extends Plugin {
+  private adapter!: FileSystemAdapterInternals;
+  private basePath = "";
+  private readonly indexedPaths = new Set<string>();
+  private isScanning = false;
+  private originalShowUnsupportedFiles: unknown;
+  private readonly patchRestorers: PatchRestorer[] = [];
+
+  override async onload(): Promise<void> {
+    this.adapter = this.app.vault.adapter as FileSystemAdapterInternals;
     this.basePath = this.getBasePath();
-    this.patchRestorers = [];
-    this.indexedPaths = new Set();
-    this.originalShowUnsupportedFiles = undefined;
-    this.isScanning = false;
 
     if (!this.isSupportedDesktopAdapter()) {
       new Notice("Show All Hidden Files requires Obsidian desktop with FileSystemAdapter.", NOTICE_MS);
@@ -33,8 +79,7 @@ module.exports = class ShowAllHiddenFilesPlugin extends Plugin {
       id: "report-indexed-hidden-files",
       name: "Report indexed hidden files",
       callback: () => {
-        new Notice(`Show All Hidden Files has indexed ${this.indexedPaths.size} hidden paths.`, NOTICE_MS);
-        console.log("[show-all-hidden-files] indexed hidden paths", Array.from(this.indexedPaths).sort());
+        new Notice(`Indexed ${this.indexedPaths.size} hidden paths.`, NOTICE_MS);
       },
     });
 
@@ -43,7 +88,7 @@ module.exports = class ShowAllHiddenFilesPlugin extends Plugin {
     });
   }
 
-  onunload() {
+  override onunload(): void {
     for (const restore of this.patchRestorers.splice(0).reverse()) {
       try {
         restore();
@@ -55,15 +100,11 @@ module.exports = class ShowAllHiddenFilesPlugin extends Plugin {
     this.restoreUnsupportedFiles();
   }
 
-  isSupportedDesktopAdapter() {
-    return (
-      this.adapter instanceof FileSystemAdapter &&
-      typeof this.basePath === "string" &&
-      this.basePath.length > 0
-    );
+  private isSupportedDesktopAdapter(): boolean {
+    return this.adapter instanceof FileSystemAdapter && this.basePath.length > 0;
   }
 
-  getBasePath() {
+  private getBasePath(): string {
     if (this.adapter && typeof this.adapter.getBasePath === "function") {
       return this.adapter.getBasePath();
     }
@@ -71,50 +112,47 @@ module.exports = class ShowAllHiddenFilesPlugin extends Plugin {
     return "";
   }
 
-  rememberAndEnableUnsupportedFiles() {
-    const vault = this.app.vault;
-    const getConfig = vault && vault.getConfig;
-    const setConfig = vault && vault.setConfig;
+  private rememberAndEnableUnsupportedFiles(): void {
+    const vault = this.app.vault as VaultWithConfig;
 
-    if (typeof setConfig !== "function") {
+    if (typeof vault.setConfig !== "function") {
       return;
     }
 
     try {
       this.originalShowUnsupportedFiles =
-        typeof getConfig === "function" ? getConfig.call(vault, "showUnsupportedFiles") : undefined;
-      setConfig.call(vault, "showUnsupportedFiles", true);
+        typeof vault.getConfig === "function" ? vault.getConfig("showUnsupportedFiles") : undefined;
+      vault.setConfig("showUnsupportedFiles", true);
     } catch (error) {
       console.warn("[show-all-hidden-files] unable to enable unsupported file visibility", error);
     }
   }
 
-  restoreUnsupportedFiles() {
+  private restoreUnsupportedFiles(): void {
     if (this.originalShowUnsupportedFiles === undefined) {
       return;
     }
 
-    const vault = this.app.vault;
-    const setConfig = vault && vault.setConfig;
+    const vault = this.app.vault as VaultWithConfig;
 
-    if (typeof setConfig !== "function") {
+    if (typeof vault.setConfig !== "function") {
       return;
     }
 
     try {
-      setConfig.call(vault, "showUnsupportedFiles", this.originalShowUnsupportedFiles);
+      vault.setConfig("showUnsupportedFiles", this.originalShowUnsupportedFiles);
     } catch (error) {
       console.warn("[show-all-hidden-files] unable to restore unsupported file visibility", error);
     }
   }
 
-  patchAdapter() {
+  private patchAdapter(): void {
     this.patchReconcileDeletion();
     this.patchReconcileFile();
     this.patchListRecursiveChild();
   }
 
-  patchReconcileDeletion() {
+  private patchReconcileDeletion(): void {
     if (typeof this.adapter.reconcileDeletion !== "function") {
       return;
     }
@@ -124,8 +162,8 @@ module.exports = class ShowAllHiddenFilesPlugin extends Plugin {
 
     this.adapter.reconcileDeletion = function patchedReconcileDeletion(normalizedPath, ...rest) {
       if (plugin.isHiddenVaultPath(normalizedPath)) {
-        plugin.revealPath(normalizedPath);
-        return;
+        void plugin.revealPath(normalizedPath);
+        return undefined;
       }
 
       return original.call(this, normalizedPath, ...rest);
@@ -136,7 +174,7 @@ module.exports = class ShowAllHiddenFilesPlugin extends Plugin {
     });
   }
 
-  patchReconcileFile() {
+  private patchReconcileFile(): void {
     if (typeof this.adapter.reconcileFile !== "function") {
       return;
     }
@@ -147,7 +185,7 @@ module.exports = class ShowAllHiddenFilesPlugin extends Plugin {
     this.adapter.reconcileFile = function patchedReconcileFile(normalizedPath, ...rest) {
       if (plugin.isHiddenVaultPath(normalizedPath)) {
         void plugin.revealPath(normalizedPath);
-        return;
+        return undefined;
       }
 
       return original.call(this, normalizedPath, ...rest);
@@ -158,7 +196,7 @@ module.exports = class ShowAllHiddenFilesPlugin extends Plugin {
     });
   }
 
-  patchListRecursiveChild() {
+  private patchListRecursiveChild(): void {
     if (typeof this.adapter.listRecursiveChild !== "function") {
       return;
     }
@@ -167,8 +205,8 @@ module.exports = class ShowAllHiddenFilesPlugin extends Plugin {
     const plugin = this;
 
     this.adapter.listRecursiveChild = function patchedListRecursiveChild(normalizedPath, child, ...rest) {
-      const childName = typeof child === "string" ? child : child && child.name;
-      const childPath = normalizePath(normalizedPath ? `${normalizedPath}/${childName}` : childName || "");
+      const childName = typeof child === "string" ? child : child.name;
+      const childPath = normalizePath(normalizedPath ? `${normalizedPath}/${childName}` : childName);
 
       if (plugin.isHiddenVaultPath(childPath)) {
         void plugin.revealPath(childPath);
@@ -182,7 +220,7 @@ module.exports = class ShowAllHiddenFilesPlugin extends Plugin {
     });
   }
 
-  async rescanHiddenFiles(showNotice) {
+  private async rescanHiddenFiles(showNotice: boolean): Promise<void> {
     if (this.isScanning) {
       if (showNotice) {
         new Notice("Show All Hidden Files is already scanning.", NOTICE_MS);
@@ -194,12 +232,12 @@ module.exports = class ShowAllHiddenFilesPlugin extends Plugin {
     const startedWith = this.indexedPaths.size;
 
     try {
-      const hiddenPaths = [];
+      const hiddenPaths: string[] = [];
       await this.walkVault("", hiddenPaths);
 
-      hiddenPaths.sort((a, b) => {
-        const depth = a.split("/").length - b.split("/").length;
-        return depth || a.localeCompare(b);
+      hiddenPaths.sort((left, right) => {
+        const depth = left.split("/").length - right.split("/").length;
+        return depth || left.localeCompare(right);
       });
 
       for (const hiddenPath of hiddenPaths) {
@@ -208,7 +246,7 @@ module.exports = class ShowAllHiddenFilesPlugin extends Plugin {
 
       if (showNotice) {
         const added = this.indexedPaths.size - startedWith;
-        new Notice(`Show All Hidden Files indexed ${this.indexedPaths.size} hidden paths (${added} new).`, NOTICE_MS);
+        new Notice(`Indexed ${this.indexedPaths.size} hidden paths (${added} new).`, NOTICE_MS);
       }
     } catch (error) {
       console.error("[show-all-hidden-files] scan failed", error);
@@ -219,9 +257,9 @@ module.exports = class ShowAllHiddenFilesPlugin extends Plugin {
     }
   }
 
-  async walkVault(relativePath, hiddenPaths) {
+  private async walkVault(relativePath: string, hiddenPaths: string[]): Promise<void> {
     const absolutePath = relativePath ? path.join(this.basePath, relativePath) : this.basePath;
-    let entries;
+    let entries: fs.Dirent[];
 
     try {
       entries = await fs.promises.readdir(absolutePath, { withFileTypes: true });
@@ -232,9 +270,8 @@ module.exports = class ShowAllHiddenFilesPlugin extends Plugin {
 
     for (const entry of entries) {
       const childPath = normalizePath(relativePath ? `${relativePath}/${entry.name}` : entry.name);
-      const isHidden = this.isHiddenVaultPath(childPath);
 
-      if (isHidden) {
+      if (this.isHiddenVaultPath(childPath)) {
         hiddenPaths.push(childPath);
       }
 
@@ -244,8 +281,8 @@ module.exports = class ShowAllHiddenFilesPlugin extends Plugin {
     }
   }
 
-  async revealPath(normalizedPath) {
-    const cleanPath = normalizePath(normalizedPath || "");
+  private async revealPath(normalizedPath: string): Promise<TAbstractFile | null> {
+    const cleanPath = normalizePath(normalizedPath);
 
     if (!cleanPath || !this.isHiddenVaultPath(cleanPath)) {
       return null;
@@ -282,19 +319,17 @@ module.exports = class ShowAllHiddenFilesPlugin extends Plugin {
     }
 
     const name = path.posix.basename(cleanPath);
-    const item = stat.isDirectory()
-      ? new TFolder(this.app.vault, cleanPath)
-      : new TFile(this.app.vault, cleanPath);
+    const item = Object.create(stat.isDirectory() ? TFolder.prototype : TFile.prototype) as MutableAbstractFile;
 
     item.name = name;
     item.parent = parent;
-    item.vault = this.app.vault;
     item.path = cleanPath;
     item.stat = {
       ctime: stat.birthtimeMs,
       mtime: stat.mtimeMs,
       size: stat.size,
     };
+    item.vault = this.app.vault;
 
     this.registerVaultItem(parent, item);
     this.indexedPaths.add(cleanPath);
@@ -302,7 +337,7 @@ module.exports = class ShowAllHiddenFilesPlugin extends Plugin {
     return item;
   }
 
-  async revealParentPath(childPath) {
+  private async revealParentPath(childPath: string): Promise<TAbstractFile | null> {
     const parentPath = path.posix.dirname(childPath);
 
     if (!parentPath || parentPath === ".") {
@@ -321,7 +356,7 @@ module.exports = class ShowAllHiddenFilesPlugin extends Plugin {
     return this.revealPath(parentPath);
   }
 
-  async ensureParentFolder(childPath) {
+  private async ensureParentFolder(childPath: string): Promise<TFolder | null> {
     const parentPath = path.posix.dirname(childPath);
 
     if (!parentPath || parentPath === ".") {
@@ -338,41 +373,39 @@ module.exports = class ShowAllHiddenFilesPlugin extends Plugin {
       return null;
     }
 
-    return this.revealPath(parentPath);
+    const revealed = await this.revealPath(parentPath);
+    return revealed instanceof TFolder ? revealed : null;
   }
 
-  registerVaultItem(parent, item) {
-    const files = this.adapter.files;
-    if (files && typeof files === "object") {
-      files[item.path] = item;
+  private registerVaultItem(parent: TFolder, item: MutableAbstractFile): void {
+    if (this.adapter.files) {
+      this.adapter.files[item.path] = item;
     }
 
-    const children = parent.children;
-    if (Array.isArray(children) && !children.some((child) => child.path === item.path)) {
-      children.push(item);
-      children.sort((a, b) => a.name.localeCompare(b.name));
+    if (!parent.children.some((child) => child.path === item.path)) {
+      parent.children.push(item);
+      parent.children.sort((left, right) => left.name.localeCompare(right.name));
     }
 
-    const cache = this.app.metadataCache;
-    if (cache && typeof cache.trigger === "function") {
+    const cache = this.app.metadataCache as MetadataCacheWithTrigger;
+    if (typeof cache.trigger === "function") {
       cache.trigger("changed", item, "", undefined);
     }
   }
 
-  statVaultPath(normalizedPath) {
+  private statVaultPath(normalizedPath: string): fs.Stats | null {
     try {
-      const absolutePath = path.join(this.basePath, normalizedPath);
-      return fs.statSync(absolutePath);
+      return fs.lstatSync(path.join(this.basePath, normalizedPath));
     } catch (error) {
       console.warn(`[show-all-hidden-files] unable to stat ${normalizedPath}`, error);
       return null;
     }
   }
 
-  isHiddenVaultPath(normalizedPath) {
-    return normalizePath(normalizedPath || "")
+  private isHiddenVaultPath(normalizedPath: string): boolean {
+    return normalizePath(normalizedPath)
       .split("/")
       .filter(Boolean)
       .some((segment) => segment.startsWith("."));
   }
-};
+}
