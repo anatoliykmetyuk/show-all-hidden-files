@@ -1,7 +1,7 @@
 {
   "name": "show-all-hidden-files",
   "version": "0.1.1",
-  "description": "Reveals dot-prefixed hidden files and folders in the Obsidian file explorer.",
+  "description": "Reveals dot-prefixed hidden files and folders in the file explorer.",
   "main": "main.js",
   "type": "module",
   "scripts": {
