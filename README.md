@@ -12,6 +12,9 @@ high-volume paths such as `.obsidian`, `.git`, `.venv`, `.env`, `.trash`, and
 1. Install and enable **Show All Hidden Files**.
 2. Run **Show All Hidden Files: Rescan hidden files** from the command palette
    if hidden files were created after startup.
+3. Optional: add exact file or folder names in **Settings > Community plugins >
+   Show All Hidden Files > Ignored names** to keep those names hidden anywhere
+   in the vault.
 
 The plugin also enables Obsidian's unsupported-file visibility setting while it
 is active, so non-Markdown hidden files can appear in the file explorer.
@@ -19,6 +22,8 @@ is active, so non-Markdown hidden files can appear in the file explorer.
 ## Behavior
 
 - Reveals any vault-relative path with a segment beginning with `.`.
+- Keeps ignored names hidden by exact file or folder name, independent of path.
+- Skips ignored folders and any hidden files or folders inside them.
 - Works for root-level and nested hidden paths.
 - Does not rename, delete, or modify vault files.
 - Does not follow symlinked directories during scans, to avoid recursive loops.

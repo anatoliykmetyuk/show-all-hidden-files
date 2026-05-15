@@ -2,6 +2,8 @@ import {
   FileSystemAdapter,
   Notice,
   Plugin,
+  PluginSettingTab,
+  Setting,
   TAbstractFile,
   TFile,
   TFolder,
@@ -47,6 +49,14 @@ interface MetadataCacheWithTrigger {
   trigger?: (name: string, ...args: unknown[]) => void;
 }
 
+interface ShowAllHiddenFilesSettings {
+  ignoredNames: string[];
+}
+
+const DEFAULT_SETTINGS: ShowAllHiddenFilesSettings = {
+  ignoredNames: [],
+};
+
 export default class ShowAllHiddenFilesPlugin extends Plugin {
   private adapter!: FileSystemAdapterInternals;
   private basePath = "";
@@ -54,10 +64,15 @@ export default class ShowAllHiddenFilesPlugin extends Plugin {
   private isScanning = false;
   private originalShowUnsupportedFiles: unknown;
   private readonly patchRestorers: PatchRestorer[] = [];
+  private ignoredNamesUpdateTimeout: ReturnType<typeof setTimeout> | null = null;
+  settings: ShowAllHiddenFilesSettings = { ...DEFAULT_SETTINGS };
 
   override async onload(): Promise<void> {
+    await this.loadSettings();
+
     this.adapter = this.app.vault.adapter as FileSystemAdapterInternals;
     this.basePath = this.getBasePath();
+    this.addSettingTab(new ShowAllHiddenFilesSettingTab(this.app, this));
 
     if (!this.isSupportedDesktopAdapter()) {
       new Notice("Show All Hidden Files requires Obsidian desktop with FileSystemAdapter.", NOTICE_MS);
@@ -89,6 +104,11 @@ export default class ShowAllHiddenFilesPlugin extends Plugin {
   }
 
   override onunload(): void {
+    if (this.ignoredNamesUpdateTimeout) {
+      clearTimeout(this.ignoredNamesUpdateTimeout);
+      this.ignoredNamesUpdateTimeout = null;
+    }
+
     for (const restore of this.patchRestorers.splice(0).reverse()) {
       try {
         restore();
@@ -161,7 +181,7 @@ export default class ShowAllHiddenFilesPlugin extends Plugin {
     const plugin = this;
 
     this.adapter.reconcileDeletion = function patchedReconcileDeletion(normalizedPath, ...rest) {
-      if (plugin.isHiddenVaultPath(normalizedPath)) {
+      if (plugin.shouldRevealVaultPath(normalizedPath)) {
         void plugin.revealPath(normalizedPath);
         return undefined;
       }
@@ -183,7 +203,7 @@ export default class ShowAllHiddenFilesPlugin extends Plugin {
     const plugin = this;
 
     this.adapter.reconcileFile = function patchedReconcileFile(normalizedPath, ...rest) {
-      if (plugin.isHiddenVaultPath(normalizedPath)) {
+      if (plugin.shouldRevealVaultPath(normalizedPath)) {
         void plugin.revealPath(normalizedPath);
         return undefined;
       }
@@ -208,7 +228,7 @@ export default class ShowAllHiddenFilesPlugin extends Plugin {
       const childName = typeof child === "string" ? child : child.name;
       const childPath = normalizePath(normalizedPath ? `${normalizedPath}/${childName}` : childName);
 
-      if (plugin.isHiddenVaultPath(childPath)) {
+      if (plugin.shouldRevealVaultPath(childPath)) {
         void plugin.revealPath(childPath);
       }
 
@@ -271,6 +291,10 @@ export default class ShowAllHiddenFilesPlugin extends Plugin {
     for (const entry of entries) {
       const childPath = normalizePath(relativePath ? `${relativePath}/${entry.name}` : entry.name);
 
+      if (this.isIgnoredVaultPath(childPath)) {
+        continue;
+      }
+
       if (this.isHiddenVaultPath(childPath)) {
         hiddenPaths.push(childPath);
       }
@@ -284,7 +308,7 @@ export default class ShowAllHiddenFilesPlugin extends Plugin {
   private async revealPath(normalizedPath: string): Promise<TAbstractFile | null> {
     const cleanPath = normalizePath(normalizedPath);
 
-    if (!cleanPath || !this.isHiddenVaultPath(cleanPath)) {
+    if (!cleanPath || !this.shouldRevealVaultPath(cleanPath)) {
       return null;
     }
 
@@ -349,7 +373,7 @@ export default class ShowAllHiddenFilesPlugin extends Plugin {
       return existing;
     }
 
-    if (!this.isHiddenVaultPath(parentPath)) {
+    if (!this.shouldRevealVaultPath(parentPath)) {
       return null;
     }
 
@@ -407,5 +431,136 @@ export default class ShowAllHiddenFilesPlugin extends Plugin {
       .split("/")
       .filter(Boolean)
       .some((segment) => segment.startsWith("."));
+  }
+
+  private shouldRevealVaultPath(normalizedPath: string): boolean {
+    const cleanPath = normalizePath(normalizedPath);
+    return this.isHiddenVaultPath(cleanPath) && !this.isIgnoredVaultPath(cleanPath);
+  }
+
+  private isIgnoredVaultPath(normalizedPath: string): boolean {
+    const ignoredNames = new Set(this.settings.ignoredNames);
+
+    if (ignoredNames.size === 0) {
+      return false;
+    }
+
+    return normalizePath(normalizedPath)
+      .split("/")
+      .filter(Boolean)
+      .some((segment) => ignoredNames.has(segment));
+  }
+
+  async updateIgnoredNames(ignoredNames: string[]): Promise<void> {
+    this.settings.ignoredNames = normalizeIgnoredNames(ignoredNames);
+    await this.saveSettings();
+    this.pruneIgnoredIndexedPaths();
+    void this.rescanHiddenFiles(false);
+  }
+
+  queueIgnoredNamesUpdate(ignoredNames: string[]): void {
+    if (this.ignoredNamesUpdateTimeout) {
+      clearTimeout(this.ignoredNamesUpdateTimeout);
+    }
+
+    this.ignoredNamesUpdateTimeout = setTimeout(() => {
+      this.ignoredNamesUpdateTimeout = null;
+      void this.updateIgnoredNames(ignoredNames);
+    }, 500);
+  }
+
+  private async loadSettings(): Promise<void> {
+    const saved = (await this.loadData()) as Partial<ShowAllHiddenFilesSettings> | null;
+
+    this.settings = {
+      ...DEFAULT_SETTINGS,
+      ...saved,
+      ignoredNames: normalizeIgnoredNames(saved?.ignoredNames ?? DEFAULT_SETTINGS.ignoredNames),
+    };
+  }
+
+  private async saveSettings(): Promise<void> {
+    await this.saveData(this.settings);
+  }
+
+  private pruneIgnoredIndexedPaths(): void {
+    const ignoredPaths = [...this.indexedPaths].filter((indexedPath) => this.isIgnoredVaultPath(indexedPath));
+
+    ignoredPaths.sort((left, right) => {
+      const depth = right.split("/").length - left.split("/").length;
+      return depth || right.localeCompare(left);
+    });
+
+    for (const ignoredPath of ignoredPaths) {
+      this.forgetIndexedPath(ignoredPath);
+    }
+  }
+
+  private forgetIndexedPath(normalizedPath: string): void {
+    const item = this.app.vault.getAbstractFileByPath(normalizedPath);
+
+    if (this.adapter.files) {
+      delete this.adapter.files[normalizedPath];
+    }
+
+    this.indexedPaths.delete(normalizedPath);
+
+    if (item?.parent) {
+      item.parent.children = item.parent.children.filter((child) => child.path !== normalizedPath);
+    }
+
+    const cache = this.app.metadataCache as MetadataCacheWithTrigger;
+    if (item && typeof cache.trigger === "function") {
+      cache.trigger("deleted", item);
+    }
+  }
+}
+
+function normalizeIgnoredNames(names: readonly string[]): string[] {
+  const uniqueNames = new Set<string>();
+
+  for (const name of names) {
+    const trimmedName = name.trim();
+
+    if (!trimmedName || trimmedName.includes("/") || trimmedName.includes("\\")) {
+      continue;
+    }
+
+    uniqueNames.add(trimmedName);
+  }
+
+  return [...uniqueNames].sort((left, right) => left.localeCompare(right));
+}
+
+function parseIgnoredNamesInput(value: string): string[] {
+  return normalizeIgnoredNames(value.split(/\r?\n/u));
+}
+
+class ShowAllHiddenFilesSettingTab extends PluginSettingTab {
+  constructor(
+    app: ShowAllHiddenFilesPlugin["app"],
+    private readonly plugin: ShowAllHiddenFilesPlugin,
+  ) {
+    super(app, plugin);
+  }
+
+  override display(): void {
+    const { containerEl } = this;
+    containerEl.empty();
+
+    new Setting(containerEl)
+      .setName("Ignored names")
+      .setDesc("Exact file or folder names to keep hidden everywhere in the vault. Enter one name per line.")
+      .addTextArea((text) => {
+        text
+          .setPlaceholder(".git\n.obsidian\n.DS_Store")
+          .setValue(this.plugin.settings.ignoredNames.join("\n"))
+          .onChange((value) => {
+            this.plugin.queueIgnoredNamesUpdate(parseIgnoredNamesInput(value));
+          });
+
+        text.inputEl.rows = 8;
+        text.inputEl.cols = 32;
+      });
   }
 }
